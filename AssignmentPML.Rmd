@@ -1,0 +1,204 @@
+---
+title: "AssignmentPML"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+# install libraries
+library(caret)
+library(randomForest)
+library(caTools)
+
+# read data
+# training dataset
+train <- read.csv("pml-training.csv")
+# test dataset
+test <- read.csv("pml-testing.csv")
+```
+
+## Introduction
+
+The task for this assignment was to train a model to predict the variable 'classe' in the dataset 'pml-training' (henceforth, 'train'). This dataset has the following number of columns and rows:
+
+
+```{r, echo = FALSE}
+cat(paste0("number of variables (excluding 'classe'): ", dim(train)[2]-1))
+cat(paste0("number of rows: ", dim(train)[1]))
+
+```
+
+My approach has been the following:\n
+1) Inspect the data and pre-process. Upon investigating, I noticed the presence of some (almost) empty variables and some extreme outliers. I wrote two functions to delete the (almost) empty variables and replace the outlying values (therefore compressing the distribution of the affected variables). Crucially, these functions have the option of obtaining the pre-processing parameters and list of variables from a train dataset and applying them to pre-process a test dataset. This allows to include the pre-processing in the cross-validation (see next step).\n
+2) I compared the estimated accuracy of a few different machine learning models (all supported by the caret library) based on the training dataset. Since options for cross-validation were not available for all the packages/functions I used, I wrote a function that performs a 2-fold cross-validation and reports accuracy estimates.\n
+3) The method with the highest estimated accuracy (above 99%) was the random forest model. Upon choosing this model, I re-trained it on the full training sample, and this is the model that I will use to predict the outcomes in the test dataset.
+
+## Deletion of almost-empty variables
+
+During my first inspection of the dataset, I could verify that some variables had very few observations. At least 95% of observations have 'NA' or an empty string ('') for the following variables: 
+
+```{r, echo = FALSE}
+cat("Over 95% of NAs: ")
+cat(colnames(train)[colSums(is.na(train))/dim(train)[1]>=.95])
+cat("Over 95% of empty strings: ")
+cat(colnames(train)[is.na(colSums(train==""))==F&colSums(train=="")/dim(train)[1]>=.95])
+
+```
+
+I generated a function that drops these variables. This function takes two arguments, a training dataset from which I identify the variables to be dropped, and a test dataset that is pre-processed accordingly (in the function default option, the two datasets coincide).
+```{r, echo = FALSE}
+drop_empty_columns <- function(traindata, testdata=traindata) {
+  include1 <- colnames(traindata)[colSums(is.na(traindata))/dim(traindata)[1]<.95]
+  include2 <- colnames(traindata)[colSums(traindata=="")/dim(traindata)[1]<.95]
+  include <- include1[include1%in%include2] # list of variables to keep
+  if (is.null(testdata$classe)) {include <- include[-grep("classe",include)]} # in case the test dataset does not contain the variable "classe" (like the test dataset of this assignment), i have to remove it from the list of variables to keep
+  output <- testdata[,include]
+  return(output)
+}
+```
+
+After applying this function to the training dataset, it resulted that there are no NAs or empty strings left. This is good news, it means that no imputation is necessary.
+
+```{r, echo = FALSE}
+train2 <- drop_empty_columns(train)
+cat(paste0("Total number of NAs and empty cells left in the dataset:"),sum(c(colSums(is.na(train2)), colSums(train2==""))))
+```
+
+Notice that, in principle, I would not need to "train" the pre-processing. I have all the info on the predicting variables also in the test dataset. However, since the test dataset is very small in this assignment, it is much better to derive the list of variables to be treated and the associated parameters from the training dataset, where they can be estimated with more precision.
+
+
+## Replacement of outlier values
+
+During my first inspection of the dataset, I could verify that some variables are affected by extreme outliers. The following plot is a good example of that.
+
+```{r, echo = FALSE}
+with(train2, plot(gyros_dumbbell_x, gyros_forearm_z))
+```
+
+I generated a function a function that: \n
+(1) identifies those variables with a high ratio (>5) of min / 2.5th percentile or max / 97.5th percentile\n
+(2) changes the values of outliers in these variables so that the max becomes equal to the 97.5th percentile and the min becomes equal to the 2.5th percentile 
+
+Like the previous function, also this one takes two arguments: a training dataset from which I identify the variables to be treated and I calculate the cut-off values; and a test dataset that is pre-processed accordingly (in the function default option, the two datasets coincide).
+
+In short, this function works as follows:\n
+- It applies to each column of the training dataset a custom-made function ('stigmatise') that reports summary statistics (max, min, 2.5th percentile and 97.5th percentile) of all numeric variables\n
+- It makes a list of all variables in the training dataset for which either the ratio between min and 2.5th percentile and/or the ratio between the max and the 97.5th percentile exceeds 5 (based on a data inspection, this function works well to identify extreme outliers)\n
+- It takes the test dataset and applies to each of the stigmatised variables a custom-made function ('cut_wings') that bounds their distribution at their 2.5th and 97.5th percentiles (as calculated from the training dataset)
+
+```{r, echo = FALSE}
+solve_outliers_problem <- function(traindata, testdata=traindata) {
+  # find out which columns should have the value of their outliers cut
+  # generate a stigmatise function that returns, for each variable: the ratio between min and 2.5th percentile; the ratio between max and the 97.5th percentile
+  stigmatise <- function(x) {
+    if(class(x)=="numeric") {
+      output <- data.frame(min=min(x),pct025=quantile(x, probs = c(.025)), max=max(x), pct975=quantile(x, probs = c(.975)))
+      rownames(output) <- deparse(substitute(x))
+    } else {output <- data.frame(min=1, pct025=1, max=1, pct975=1)} # if variables are not numeric, i treat them as if they had a completely flat distribution, i.e. there is no outlier
+    return(output)
+  }
+  # apply the function above to every variable in the training dataset
+  stigmatise_list <- lapply(traindata,stigmatise)
+  stigmatise_df <- as.data.frame(do.call("rbind",stigmatise_list))
+  head(stigmatise_df)
+  # identify those variables with a high ratio (>5) of: min / 2.5th percentile ; max / 97.5th percentile. in the case of this dataset these measures works well because there is no negative ratio
+  stigmatised_columns <- rownames(stigmatise_df[stigmatise_df$min/stigmatise_df$pct025>5|stigmatise_df$max/stigmatise_df$pct975>5,])
+  stigmatised_columns
+  
+  # change values of outliers so that max becomes the 97.5th percentile and min becomes the 2.5th percentile
+  # the first step is writing a function that "cuts the wings" of the outliers by replacing their values with the 2.5th or the 97.5th percentiles
+  cut_wings <- function(targetdata, x) {
+    targetdata[,x][targetdata[,x]<stigmatise_df[x,"pct025"]] <- as.numeric(stigmatise_df[x,"pct025"])
+    targetdata[,x][targetdata[,x]>stigmatise_df[x,"pct975"]] <- as.numeric(stigmatise_df[x,"pct975"])
+    return(targetdata[,x])
+  }
+  # next, i deploy this function through a loop over the problematic variables
+  for (var in stigmatised_columns) {
+    testdata[,var] <- cut_wings(testdata,var)
+  }
+  
+  # return output
+  output <- as.data.frame(testdata)
+  return(output)
+
+}
+
+```
+
+I checked that applying this function compresses the distribution in the desired way. For example, I took a look at the same chart that I showed above, and the distribution now looks more standard.
+
+```{r, echo = FALSE}
+train2 <- solve_outliers_problem(train2)
+with(train2, plot(gyros_dumbbell_x, gyros_forearm_z))
+```
+
+
+## Cross-validation
+
+I wrote a function performing a 2-fold cross-validation of machine learning models supported by caret. This was made necessary by the fact that the 'LogitBoost' function that I used does not contain options for cross-validation. By writing my own function, I ensured that all the models that I tried have been compared in the same way. 
+
+The pre-processing has also been included in the cross-validation, so I could get a picture of the performance of each model that I tried on the pre-processed data. Including the pre-processing in the cross-validation was made possible by the fact that my pre-processing functions allowed as arguments both a training and a testing dataset, as seen in the previous sections.
+
+In short, the function (which takes a method as an argument) works as follows:\n
+- Split the training data in half through caret's 'createDataPartition' function\n
+- For each of the two data partitions: a) train the model based on the chosen method using caret's 'train' function (e.g. random forest); b) use the parameters from the trained model (and pre-processing) to predict outcomes in the other partition, using the 'predict' function; c) calculate the proportion of correctly predicted outcomes\n
+- Calculate the average between the two estimated proportions of correctly predicted outcomes to get a measure of the accuracy of the method
+
+
+```{r, echo = FALSE}
+cross_validate <- function(mymethod) {
+  # generate datasets for cross-validation
+  inTrain <- createDataPartition(y=train$classe, p=.5, list=F)
+  cross1 <- train[inTrain,]
+  cross2 <- train[-inTrain,]
+  dim(cross1)
+  dim(cross2)
+  # cross-validation 1: nb when training the model, i simply deploy the functions "solve_outliers_problem" and "drop_empty_columns" to the training dataset (cross1 in this case). when predicting, i obtain the lists of variables to be treated and the pre-processing parameters from the training dataset (cross1), but I use them to pre-process the "test" dataset (cross 2 in this case)
+  ModFit_1 <- train(classe~., data = solve_outliers_problem(drop_empty_columns(cross1)), method=mymethod)
+  pred_on_cross2 <- predict(ModFit_1, newdata = solve_outliers_problem(traindata = drop_empty_columns(cross1), testdata = drop_empty_columns(traindata=cross1, testdata=cross2)), type="raw")
+  estimated_accuracy_on_cross2 <- sum(as.numeric(pred_on_cross2==cross2$classe), na.rm = T) / length(cross2$classe)
+  # cross-validation 2: nb i do the same as for cross-validation 1, but inverting the datasets
+  ModFit_2 <- train(classe~., data = solve_outliers_problem(drop_empty_columns(cross2)), method=mymethod)
+  pred_on_cross1 <- predict(ModFit_1, newdata = solve_outliers_problem(traindata = drop_empty_columns(cross2), testdata = drop_empty_columns(traindata=cross2, testdata=cross1)), type="raw")
+  estimated_accuracy_on_cross1 <- sum(as.numeric(pred_on_cross1==cross1$classe), na.rm = T) / length(cross1$classe)
+  # average estimated accuracy from 2-fold cross-validation:
+  estimated_accuracy <- mean(c(estimated_accuracy_on_cross1,estimated_accuracy_on_cross2))
+  # compile and return output
+  output <- data.frame(method=mymethod,accuracy=estimated_accuracy)
+  return(output)
+}
+```
+
+I applied the cross-validation function to three models: a simple decision tree ("rpart"), a random forest ("rf"), and a boosted logit ("LogitBoost"). I compared the estimated accuracies based on a 2-fold cross-validation, and found that that the random forest performed slightly better than the boosted logit (the accuracy of both is above 99%),  so I chose the random for predicting the outcomes of the test dataset. The decision tree has a much lower accuracy (66%), that can serve as a useful benchmark of the performance obtained with a simpler model.
+
+```{r, echo = FALSE}
+estimated_accuracy_list <- lapply(c("rpart","rf","LogitBoost"))
+estimated_accuracy_df <- as.data.frame(do.call("rbind", estimated_accuracy_list))
+write.csv(estimated_accuracy_df, "estimated_accuracy_df.csv") # i am saving the outcome, just in case
+print(read.csv("estimated_accuracy_df.csv"))
+```
+
+
+## Prediction
+
+Now that I have chosen a model, I can re-train it on the full training dataset and use it to predict outcomes on the test dataset. I would expect to get all or nearly all categories predicted correctly. This is because I did not tinker much with the data, so the accuracy estimated from the cross-validation (close to 100%) should be quite reliable.
+
+Below I report the distribution of observations in the test dataset across the predicted "classe" categories. My model only predicts category "A" in the test dataset.
+
+
+```{r, echo = FALSE}
+ModFit <- train(classe~., data = solve_outliers_problem(drop_empty_columns(train)), method="rf")
+pred <- predict(ModFit, newdata = solve_outliers_problem(traindata = drop_empty_columns(train), testdata = drop_empty_columns(traindata=train, testdata=test)), type="raw")
+write.csv(pred,"pred.csv") # i am saving the outcome, just in case
+print(table(as.data.frame(read.csv("pred.csv"))$x))
+```
+
+
+## Possible additional work
+
+It would have been interesting to try a few different pre-processing procedures, and see how they affect predicting power. In addition, I could have tried a few more models and experiment a bit with the estimation options of each model (e.g. the number of iterations of the boosted logit). Finally, I would have liked to combine models, in particular by using the boosted logit to predict probabilities for each class that could then be added as predicting variables for the random forest. However, the estimated accuracy was already very high, and I have already spent enough time on the assignment, so I prefer to leave it as it is.

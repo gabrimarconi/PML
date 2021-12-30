@@ -188,7 +188,7 @@ print(read.csv("estimated_accuracy_df.csv"))
 
 Now that I have chosen a model, I can re-train it on the full training dataset and use it to predict outcomes on the test dataset. I would expect to get all or nearly all categories predicted correctly. This is because I did not tinker much with the data, so the accuracy estimated from the cross-validation (close to 100%) should be quite reliable.
 
-Below I report the distribution of observations in the test dataset across the predicted "classe" categories. My model only predicts category "A" in the test dataset.
+Below I report the distribution of observations in the test dataset across the predicted "classe" categories. My model predicts that the large part (75%) of observations in the test dataset belong to categories "A" and "B".
 
 
 ```{r, echo = FALSE}

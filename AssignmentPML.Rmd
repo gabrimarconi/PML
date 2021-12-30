@@ -57,6 +57,7 @@ drop_empty_columns <- function(traindata, testdata=traindata) {
   include2 <- colnames(traindata)[colSums(traindata=="")/dim(traindata)[1]<.95]
   include <- include1[include1%in%include2] # list of variables to keep
   if (is.null(testdata$classe)) {include <- include[-grep("classe",include)]} # in case the test dataset does not contain the variable "classe" (like the test dataset of this assignment), i have to remove it from the list of variables to keep
+  include <- include[3:length(include)] # excluding user name and row number
   output <- testdata[,include]
   return(output)
 }
@@ -177,7 +178,7 @@ cross_validate <- function(mymethod) {
 I applied the cross-validation function to three models: a simple decision tree ("rpart"), a random forest ("rf"), and a boosted logit ("LogitBoost"). I compared the estimated accuracies based on a 2-fold cross-validation, and found that that the random forest performed slightly better than the boosted logit (the accuracy of both is above 99%),  so I chose the random for predicting the outcomes of the test dataset. The decision tree has a much lower accuracy (66%), that can serve as a useful benchmark of the performance obtained with a simpler model.
 
 ```{r, echo = FALSE}
-estimated_accuracy_list <- lapply(c("rpart","rf","LogitBoost"))
+estimated_accuracy_list <- lapply(c("rpart","rf","LogitBoost"), cross_validate)
 estimated_accuracy_df <- as.data.frame(do.call("rbind", estimated_accuracy_list))
 write.csv(estimated_accuracy_df, "estimated_accuracy_df.csv") # i am saving the outcome, just in case
 print(read.csv("estimated_accuracy_df.csv"))
